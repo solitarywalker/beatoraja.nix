@@ -10,25 +10,26 @@
 let
   cfg = config.programs.beatoraja;
 
-  # ランチャー画面 (PlayConfigurationView) は JavaFX 製で、Linux では Glass
-  # ツールキットの GTK3 バックエンドが描画する (クラッシュ時のスタックトレースに
-  # com.sun.glass.ui.gtk.GtkApplication._runLoop が出る)。この GTK3 が起動途中で
-  # GSettings を引くが、スキーマが 1 つも見つからないと GLib が
+  # The launcher screen (PlayConfigurationView) is JavaFX, and on Linux it is
+  # drawn by the Glass toolkit's GTK3 backend (com.sun.glass.ui.gtk.GtkApplication
+  # ._runLoop shows up in the stack trace when it crashes). That GTK3 reads
+  # GSettings during startup, and if it finds no schemas at all GLib goes through
   #   g_settings_schema_source_get_default() == NULL
   #   -> g_error ("No GSettings schemas are installed on the system")
-  # (gio/gsettings.c:676) を通る。g_error は GLib では致命的扱いで abort() する
-  # ため、JVM ごと SIGABRT で落ちる。「操作していたら急に落ちる」の正体。
+  # (gio/gsettings.c:676). g_error is fatal in GLib and calls abort(), taking the
+  # JVM with it via SIGABRT. That is what "it suddenly dies while I'm using it"
+  # really is.
   #
-  # NixOS では衝突回避のため、各パッケージが gschema を
-  #   share/gsettings-schemas/<パッケージ名>/glib-2.0/schemas/
-  # という隔離された場所に置き、システムプロファイルの share/glib-2.0/schemas へは
-  # マージしない (実際 /run/current-system/sw にそのディレクトリは存在しない)。
-  # そのため environment.systemPackages に gtk3 を足すだけでは GTK からは見えず、
-  # 自前で結合してコンパイルし、GSETTINGS_SCHEMA_DIR で明示的に指す必要がある。
+  # To avoid collisions, NixOS has each package put its gschemas in an isolated
+  #   share/gsettings-schemas/<package name>/glib-2.0/schemas/
+  # rather than merging them into the system profile's share/glib-2.0/schemas
+  # (that directory genuinely does not exist under /run/current-system/sw). So
+  # adding gtk3 to environment.systemPackages is not enough for GTK to see them:
+  # they have to be merged and compiled by hand and pointed at explicitly with
+  # GSETTINGS_SCHEMA_DIR.
   #
-  # gtk3 と gsettings-desktop-schemas の両方が要る。GTK が参照する
-  # org.gtk.Settings.* を持っているのは gtk3 の方で、
-  # gsettings-desktop-schemas には入っていない。
+  # Both gtk3 and gsettings-desktop-schemas are needed. The org.gtk.Settings.*
+  # that GTK looks up live in gtk3, not in gsettings-desktop-schemas.
   mergedGsettingsSchemas =
     pkgs.runCommand "merged-gsettings-schemas"
       {
@@ -53,20 +54,21 @@ in
         inherit (cfg) dataDir;
       };
       defaultText = lib.literalExpression "pkgs.callPackage ./beatoraja.nix { }";
-      description = "使用する beatoraja パッケージ。";
+      description = "The beatoraja package to use.";
     };
 
     dataDir = lib.mkOption {
       type = lib.types.path;
       default = "/var/lib/beatoraja";
       description = ''
-        ゲームが読み書きするディレクトリ。
+        Directory the game reads and writes.
 
-        store は読み取り専用だが beatoraja は自分のディレクトリへ config.json /
-        player/ / songdata.db / スコアなどを書くため、初回起動時に配布物をここへ
-        複製してから使う。楽曲データや設定もここに置かれるので、消すと失われる。
+        The store is read-only, but beatoraja writes config.json, player/,
+        songdata.db and scores into its own directory, so the distribution is
+        copied here on first run and used from here afterwards. Songs and settings
+        end up here too, so deleting it loses them.
 
-        このディレクトリは下の group が書き込めるように作られる。
+        The directory is created writable by the group configured below.
       '';
     };
 
@@ -74,9 +76,9 @@ in
       type = lib.types.str;
       default = "users";
       description = ''
-        dataDir を書き込めるグループ。プレイするユーザーが属している必要がある。
+        Group allowed to write dataDir. Anyone who plays must belong to it.
 
-        setgid を立てるので、この下に作られるファイルはこのグループを継承する。
+        setgid is set, so files created underneath inherit this group.
       '';
     };
 
@@ -84,10 +86,10 @@ in
       type = lib.types.bool;
       default = true;
       description = ''
-        JavaFX 入りの JDK を systemPackages にも入れるかどうか。
+        Whether to also put the JavaFX-enabled JDK into systemPackages.
 
-        beatoraja の起動自体には不要 (ラッパーが runtimeInputs で抱えている)。
-        `java` をシステム全体の PATH に置きたい場合のみ true にする。
+        Not needed to launch beatoraja itself — the wrapper carries its own via
+        runtimeInputs. Set this only if you want `java` on the system-wide PATH.
       '';
     };
 
@@ -95,10 +97,10 @@ in
       type = lib.types.bool;
       default = true;
       description = ''
-        GSETTINGS_SCHEMA_DIR を sessionVariables に設定するかどうか。
+        Whether to set GSETTINGS_SCHEMA_DIR in sessionVariables.
 
-        これが無いと JavaFX ランチャーが GLib の g_error で abort する。
-        他に GSETTINGS_SCHEMA_DIR を設定している仕組みがある場合のみ false にする。
+        Without it the JavaFX launcher aborts on GLib's g_error. Set to false only
+        if something else already sets GSETTINGS_SCHEMA_DIR.
       '';
     };
   };
@@ -109,21 +111,22 @@ in
     ]
     ++ lib.optional cfg.installJdk cfg.package.jdk
     ++ [
-      # ランチャーの GTK3 バックエンドが引く gschema と、gsettings CLI。
+      # The gschemas the launcher's GTK3 backend reads, plus the gsettings CLI.
       pkgs.gsettings-desktop-schemas
       pkgs.glib
     ];
 
-    # sessionVariables なのでログインシェル起動時にしか反映されない。
-    # 変更後は再ログイン (または新しいセッション) が必要で、既存の端末から
-    # そのまま起動しても効かない。
+    # These are sessionVariables, so they only apply to login shells. After a
+    # change you need to log in again (or start a new session) — launching from an
+    # already-open terminal will not pick it up.
     environment.sessionVariables = lib.mkIf cfg.setGsettingsSchemaDir {
       GSETTINGS_SCHEMA_DIR = "${mergedGsettingsSchemas}/glib-2.0/schemas";
     };
 
-    # dataDir を group 書き込み可で用意する。ラッパーは初回起動時にここへ配布物を
-    # 複製するが、/var/lib 直下はユーザー権限では作れないため、ここで先に作っておく。
-    # 2 = setgid。以下に作られるファイルが group を継承するようにする。
+    # Prepare dataDir as group-writable. The wrapper copies the distribution here
+    # on first run, but a user cannot create directories directly under /var/lib,
+    # so it has to exist beforehand.
+    # 2 = setgid, so files created underneath inherit the group.
     systemd.tmpfiles.rules = [
       "d ${cfg.dataDir} 2775 root ${cfg.group} -"
     ];

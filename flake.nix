@@ -25,8 +25,8 @@
         };
       };
 
-      # モジュール側では pkgs.callPackage で組むので、利用側の nixpkgs で
-      # ビルドされる (この flake の nixpkgs 入力は使われない)。
+      # The module builds via pkgs.callPackage, so it is built against the
+      # consumer's nixpkgs — this flake's own nixpkgs input goes unused there.
       nixosModules.beatoraja = import ./module.nix { inherit jportaudio; };
       nixosModules.default = self.nixosModules.beatoraja;
     }

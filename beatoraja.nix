@@ -19,18 +19,19 @@
   libpulseaudio,
   alsa-lib,
   jportaudio,
-  # 起動時にゲームが読み書きするディレクトリ。store は読み取り専用なので、
-  # 配布物をここへ複製してから使う。実行時に BEATORAJA_DIR で上書きできる。
+  # Directory the game reads and writes at runtime. The store is read-only, so the
+  # distribution is copied here first. Overridable at runtime via BEATORAJA_DIR.
   dataDir ? "/var/lib/beatoraja",
 }:
 
 let
   version = "0.8.8-modernchic";
 
-  # 配布物。展開後 671 MB あるので store を相応に消費する。
+  # The distribution. 671 MB once unpacked, so it takes up a fair chunk of store.
   #
-  # zip 内には Shift-JIS のファイル名が含まれており、nix-prefetch-url --unpack
-  # (libarchive) は locale 変換に失敗する。fetchzip は unzip 経路なので通る。
+  # The zip contains Shift-JIS filenames, which makes nix-prefetch-url --unpack
+  # (libarchive) fail on locale conversion. fetchzip goes through unzip, which
+  # handles them.
   gameFiles = fetchzip {
     name = "beatoraja-${version}-dist";
     url = "https://mocha-repository.info/download/beatoraja${version}.zip";
@@ -38,67 +39,70 @@ let
     stripRoot = true;
   };
 
-  # ランチャー画面 (PlayConfigurationView) は JavaFX 製なので JavaFX 入りの JDK が要る。
-  # WebKit はランチャー内の HTML 表示用。
+  # The launcher screen (PlayConfigurationView) is JavaFX, so the JDK needs it
+  # built in. WebKit is for the HTML view inside that launcher.
   #
-  # これを関数引数にして外から差し替え可能にしてはいけない。下の
-  # LD_LIBRARY_PATH に足す ${jdk}/lib/openjdk/lib と、runtimeInputs 経由で PATH に
-  # 載る java が、同一の JDK でなければならないため:
+  # Do NOT turn this into a function argument to make it swappable. The
+  # ${jdk}/lib/openjdk/lib entry added to LD_LIBRARY_PATH below and the java that
+  # runtimeInputs puts on PATH have to be the same JDK:
   #
-  #   liblwjgl64.so  NEEDED  libjawt.so            (バージョン無し)
+  #   liblwjgl64.so  NEEDED  libjawt.so            (unversioned)
   #   libjawt.so     NEEDED  libjvm.so, libjava.so, libawt.so, ...
-  #                  RUNPATH <その JDK>/lib/openjdk/lib
-  #                         :<その JDK>/lib/openjdk/lib/server
+  #                  RUNPATH <that JDK>/lib/openjdk/lib
+  #                         :<that JDK>/lib/openjdk/lib/server
   #
-  # libjawt.so は RUNPATH で自分の出身 JDK に固定されているので、必ず出身 JDK の
-  # libjvm.so を引き連れてくる。PATH 側と LD_LIBRARY_PATH 側がずれると 1 プロセスに
-  # libjvm.so が 2 つ載る。Nix はこの不整合を検出できない (どちらも正当なパスなので
-  # ビルドも評価も通り、実行時に初めて壊れる)。
+  # libjawt.so is pinned by RUNPATH to the JDK it came from, so it always drags
+  # that JDK's libjvm.so in with it. If the PATH side and the LD_LIBRARY_PATH side
+  # disagree, one process ends up with two libjvm.so loaded. Nix cannot catch this
+  # mismatch — both paths are legitimate, so it builds and evaluates fine and only
+  # breaks at runtime.
   jdk = openjdk.override {
     enableJavaFX = true;
     openjfx_jdk = openjfx.override { withWebKit = true; };
   };
 
-  # beatoraja.jar には LWJGL2 / libGDX のネイティブ .so が同梱されているが、
-  # NixOS には FHS のライブラリパスも /etc/ld.so.cache も無いため、それらが
-  # 実行時に依存ライブラリを解決できない。LD_LIBRARY_PATH で明示的に与える。
+  # beatoraja.jar bundles native .so files for LWJGL2 / libGDX, but NixOS has
+  # neither the FHS library paths nor /etc/ld.so.cache, so those natives cannot
+  # resolve their dependencies at runtime. Hand them over via LD_LIBRARY_PATH.
   #
-  #   - libpulse / libasound : 必須。これが無いと OpenAL は pulse も alsa も
-  #                            dlopen できず oss にフォールバックし、
-  #                            デバイス取得が NULL になって完全な無音になる。
-  #                            (実測: java -jar で直接起動すると再現する)
-  #                            => 必ず この beatoraja ラッパー経由で起動すること
+  #   - libpulse / libasound : Required. Without them OpenAL can dlopen neither
+  #                            pulse nor alsa, falls back to oss, and the device
+  #                            handle comes back NULL — completely silent.
+  #                            (Measured: reproducible by running java -jar
+  #                            directly.)
+  #                            => always launch through this beatoraja wrapper
   #
-  #   - libX11 / libstdc++   : libgdx-controllers-desktop64.so が DT_NEEDED で
-  #                            要求する。ただし実際には JVM が AWT/JavaFX 用に
-  #                            読み込む JDK 同梱ネイティブ (RPATH 付き) が先に
-  #                            これらをプロセスへ載せるため、ここに無くても
-  #                            コントローラーは動いてしまう。読み込み順に
-  #                            依存しないよう明示しておく。
+  #   - libX11 / libstdc++   : Required by libgdx-controllers-desktop64.so via
+  #                            DT_NEEDED. In practice the JDK's own natives (which
+  #                            carry an RPATH), loaded by the JVM for AWT/JavaFX,
+  #                            already pull these into the process first, so
+  #                            controllers work even without them here. Listed
+  #                            anyway so nothing depends on load order.
   #
-  #   - libjawt (JDK 同梱)   : liblwjgl64.so が DT_NEEDED で要求する。
-  #                            ここに足す JDK は runtimeInputs の JDK と同一で
-  #                            なければならない (理由は上の jdk のコメント)
+  #   - libjawt (from JDK)   : Required by liblwjgl64.so via DT_NEEDED. The JDK
+  #                            added here must be the same one as in
+  #                            runtimeInputs — see the comment on jdk above.
   #
-  #   - jportaudio           : beatoraja の PortAudio ドライバは Linux では
-  #                            System.loadLibrary("jportaudio") で
-  #                            libjportaudio.so を探すが、配布物に入っている
-  #                            ネイティブは Windows 用の jportaudio_x64.dll /
-  #                            portaudio_x64.dll だけ (jar 内は Java バインディング
-  #                            com/portaudio/*.class のみ)。
-  #                            OpenAL ドライバ経路だと config の deviceBufferSize は
-  #                            libGDX の audioDeviceBufferSize にしか渡らず効かないが、
-  #                            PortAudio ドライバでは
+  #   - jportaudio           : On Linux beatoraja's PortAudio driver looks for
+  #                            libjportaudio.so via
+  #                            System.loadLibrary("jportaudio"), but the natives
+  #                            shipped in the distribution are Windows-only
+  #                            (jportaudio_x64.dll / portaudio_x64.dll; the jar
+  #                            itself holds only the Java bindings in
+  #                            com/portaudio/*.class).
+  #                            On the OpenAL path, deviceBufferSize from the
+  #                            config only reaches libGDX's audioDeviceBufferSize
+  #                            and has no effect, whereas the PortAudio driver
+  #                            applies it directly as
   #                              suggestedLatency = deviceBufferSize / sampleRate
   #                              openStream(..., framesPerBuffer = deviceBufferSize, ...)
-  #                            として直接効く。
   wrapper = writeShellApplication {
     name = "beatoraja";
     runtimeInputs = [
       jdk
       systemd
-      # 初回の複製で使う cp / chmod / mkdir / cat。.desktop から起動されると
-      # PATH が最小限のことがあるので、環境に頼らず明示する。
+      # cp / chmod / mkdir / cat for the first-run copy. PATH can be minimal when
+      # launched from the .desktop entry, so don't rely on the environment.
       coreutils
     ];
     text = ''
@@ -118,87 +122,92 @@ let
         ]
       }:${jdk}/lib/openjdk/lib''${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}
 
-      # pipewire-pulse を優先し、無ければ ALSA へ
+      # Prefer pipewire-pulse, fall back to ALSA
       export ALSOFT_DRIVERS="''${ALSOFT_DRIVERS:-pulse,alsa}"
 
-      # PortAudio ドライバの後始末。
+      # Cleaning up after the PortAudio driver.
       #
-      # beatoraja の PortAudioDriver は config の audio.driverName に一致する
-      # デバイスが無いと、デバイス index 0 ( = 生の hw: ) へ黙ってフォールバック
-      # する (PortAudioDriver.<init> の初期値が 0。Pa_GetDefaultOutputDevice は
-      # 使われない)。hw: を排他 open されると、アイドル中に suspend していた
-      # PipeWire がそのカードを開き直せず
+      # When no device matches audio.driverName in the config, beatoraja's
+      # PortAudioDriver silently falls back to device index 0 ( = a raw hw: ).
+      # That 0 is just the initial value in PortAudioDriver.<init>;
+      # Pa_GetDefaultOutputDevice is never called. Once hw: is opened
+      # exclusively, a PipeWire that had suspended the card while idle cannot
+      # reopen it:
       #   spa.alsa: 'front:N': playback open failed: Device or resource busy
       #   pw.node: (alsa_output.*) suspended -> error
-      # とノードが壊れる。PipeWire も WirePlumber も自動復帰しないため、
-      # beatoraja 終了後は全アプリが無音のままになる。
+      # and the node is left broken. Neither PipeWire nor WirePlumber recovers on
+      # its own, so every application stays silent after beatoraja exits.
       #
-      # ALSA のデバイス/ノードを作っているのは WirePlumber なので、これだけ
-      # 再起動すれば作り直されて復旧する (実測で確認)。pipewire 本体は落と
-      # さないので他アプリの PipeWire 接続は切れない (再生中のストリームが
-      # 一瞬途切れる程度)。
+      # WirePlumber is what creates the ALSA devices/nodes, so restarting just
+      # that recreates them and clears it (verified in practice). PipeWire itself
+      # is left running, so other applications keep their connections — a playing
+      # stream cuts out for a moment at worst.
       #
-      # 壊れたかどうかを検出して条件付きで実行する、はやらない。実測した限り
-      # 壊れ方が一定しないため:
-      #   - ノードが error 状態で残る場合   (journal の suspended -> error)
-      #   - ノードごと pw-dump から消える場合 (hw: を先に掴まれて生成に失敗)
-      # 前者だけを見ていると後者を取りこぼす。
-      # (加えて writeShellApplication は set -o pipefail なので
-      #  `pw-dump | grep -q ...` は grep が先に終了して pw-dump が SIGPIPE で
-      #  死に、マッチしてもしなくても常に false になる。この手の条件式は書けない)
+      # Deliberately unconditional: no attempt to detect whether it actually
+      # broke. Observed failures are not consistent —
+      #   - the node stays in error state    (suspended -> error in the journal)
+      #   - the node vanishes from pw-dump   (hw: was grabbed first, so it never
+      #                                       got created)
+      # and watching only for the former misses the latter.
+      # (On top of that, writeShellApplication sets -o pipefail, so
+      #  `pw-dump | grep -q ...` always evaluates false: grep exits first and
+      #  pw-dump dies of SIGPIPE whether or not it matched. Conditions of this
+      #  shape simply cannot be written here.)
       #
-      # 根本対処は beatoraja 側で PipeWire 経由のデバイス ("pipewire" や
-      # "default") を選ぶこと。これはあくまで取りこぼした場合の保険。
+      # The real fix is to select a PipeWire-backed device ("pipewire" or
+      # "default") in beatoraja's own settings. This is only a safety net for
+      # when that hasn't been done.
       restartWireplumber() {
         systemctl --user restart wireplumber || true
       }
       trap restartWireplumber EXIT
 
-      # 配布物は store にあり読み取り専用だが、beatoraja は自分のディレクトリへ
-      # config.json / player/ / songdata.db / スコアなどを書く。そのため書き込み
-      # 可能な dataDir へ初回に複製し、以降はそちらを使う。
+      # The distribution lives in the store and is read-only, but beatoraja writes
+      # config.json / player/ / songdata.db / scores into its own directory. So
+      # copy it once into the writable dataDir and work from there afterwards.
       dir="''${BEATORAJA_DIR:-${dataDir}}"
       stamp="$dir/.beatoraja-nix-dist"
 
       if [[ ! -e "$dir/beatoraja.jar" ]]; then
-        echo "beatoraja: $dir へ配布物を展開しています (初回のみ、数分かかります)" >&2
+        echo "beatoraja: unpacking the distribution into $dir (first run only, takes a few minutes)" >&2
         mkdir -p "$dir"
         cp -r ${gameFiles}/. "$dir"/
-        # store から複製したファイルは読み取り専用なので、書けるようにする
+        # Files copied out of the store are read-only; make them writable.
         chmod -R ug+w "$dir"
         echo "${gameFiles}" > "$stamp"
       elif [[ "$(cat "$stamp" 2>/dev/null || true)" != "${gameFiles}" ]]; then
-        # 配布物が更新されたが dataDir は古いまま。ユーザーデータを壊したくないので
-        # 自動では上書きしない。
-        echo "beatoraja: 配布物が更新されています (${version})。" >&2
-        echo "  $dir は現状のまま使います。反映するには beatoraja.jar 等を手で" >&2
-        echo "  ${gameFiles} から差し替えてください。" >&2
+        # The distribution changed but dataDir still holds the old one. Not
+        # overwritten automatically — that would risk the user's data.
+        echo "beatoraja: the distribution has been updated (${version})." >&2
+        echo "  Using $dir as it is. To pick the update up, replace beatoraja.jar" >&2
+        echo "  and friends by hand from ${gameFiles}" >&2
       fi
 
       cd "$dir"
-      # -DLWJGL_WM_CLASS: 下の desktopItem の startupWMClass と対応
-      # trap を効かせるため exec しない
+      # -DLWJGL_WM_CLASS: pairs with startupWMClass in desktopItem below
+      # Not exec'd, so that the trap still fires
       java -DLWJGL_WM_CLASS=beatoraja -jar beatoraja.jar "$@"
     '';
   };
 
-  # タスクバー (Plasma パネル) にピン留めするためのランチャー。
+  # Launcher entry, so it can be pinned to the taskbar (Plasma panel).
   #
-  # Icon は指定しない。beatoraja の公式配布物にはアイコン画像が一切含まれておらず
-  # (0.8.8 / 0.8.8-modernchic の zip、jar の中、GitHub の releases すべてを確認済み)、
-  # 抽出できるものが無いため。デスクトップ環境の既定アイコンが表示される。
+  # No Icon is set. The official beatoraja distribution ships no icon image at all
+  # — verified across the 0.8.8 and 0.8.8-modernchic zips, the contents of the
+  # jar, and the GitHub releases — so there is nothing to extract. The desktop
+  # environment's default icon is shown instead.
   #
-  # startupWMClass は「起動中のウィンドウ」を「ピン留めしたアイコン」に
-  # 紐づけるために必要。beatoraja の描画は LWJGL2 = X11 (XWayland) 経路で、
-  # LinuxDisplay.createWindow が
-  #   wm_class = System.getProperty("LWJGL_WM_CLASS")   # 未設定なら Display.getTitle()
+  # startupWMClass is what ties "the window that opened" to "the icon you pinned".
+  # beatoraja draws through LWJGL2 = X11 (XWayland), where
+  # LinuxDisplay.createWindow decides the res_class of WM_CLASS as
+  #   wm_class = System.getProperty("LWJGL_WM_CLASS")   # Display.getTitle() if unset
   #   setClassHint(Display.getTitle(), wm_class)
-  # として WM_CLASS の res_class を決める。既定のままだとタイトル
-  # ("beatoraja <version>" 等) に依存してしまうので、上のラッパーで
-  # -DLWJGL_WM_CLASS=beatoraja に固定し、ここでそれと一致させる。
+  # Left at its default that would depend on the title ("beatoraja <version>" and
+  # such), so the wrapper above pins it to -DLWJGL_WM_CLASS=beatoraja and this
+  # matches it.
   #
-  # startupNotify は false。Java 側が startup notification を完了させないため、
-  # true だとカーソルのローディング表示が起動後もしばらく残る。
+  # startupNotify is false: Java never completes the startup notification, so with
+  # true the loading cursor lingers for a while after the window is already up.
   desktopItem = makeDesktopItem {
     name = "beatoraja";
     desktopName = "beatoraja";
@@ -232,9 +241,10 @@ symlinkJoin {
   meta = {
     description = "beatoraja (BMS player) for NixOS";
     longDescription = ''
-      公式配布物 (beatoraja${version}.zip) を取得し、NixOS 上で正しく起動する
-      ラッパーと .desktop を提供する。store は読み取り専用なので、初回起動時に
-      ${dataDir} へ複製してからそこで動かす。
+      Fetches the official distribution (beatoraja${version}.zip) and provides the
+      wrapper and .desktop entry needed to launch it correctly on NixOS. The store
+      is read-only, so on first run it is copied into ${dataDir} and run from
+      there.
     '';
     homepage = "https://github.com/solitarywalker/beatoraja.nix";
     license = lib.licenses.mit;
