@@ -26,6 +26,20 @@
 let
   # ランチャー画面 (PlayConfigurationView) は JavaFX 製なので JavaFX 入りの JDK が要る。
   # WebKit はランチャー内の HTML 表示用。
+  #
+  # これを関数引数にして外から差し替え可能にしてはいけない。下の
+  # LD_LIBRARY_PATH に足す ${jdk}/lib/openjdk/lib と、runtimeInputs 経由で PATH に
+  # 載る java が、同一の JDK でなければならないため:
+  #
+  #   liblwjgl64.so  NEEDED  libjawt.so            (バージョン無し)
+  #   libjawt.so     NEEDED  libjvm.so, libjava.so, libawt.so, ...
+  #                  RUNPATH <その JDK>/lib/openjdk/lib
+  #                         :<その JDK>/lib/openjdk/lib/server
+  #
+  # libjawt.so は RUNPATH で自分の出身 JDK に固定されているので、必ず出身 JDK の
+  # libjvm.so を引き連れてくる。PATH 側と LD_LIBRARY_PATH 側がずれると 1 プロセスに
+  # libjvm.so が 2 つ載る。Nix はこの不整合を検出できない (どちらも正当なパスなので
+  # ビルドも評価も通り、実行時に初めて壊れる)。
   jdk = openjdk.override {
     enableJavaFX = true;
     openjfx_jdk = openjfx.override { withWebKit = true; };
@@ -48,7 +62,9 @@ let
   #                            コントローラーは動いてしまう。読み込み順に
   #                            依存しないよう明示しておく。
   #
-  #   - libjawt (JDK 同梱)   : liblwjgl64.so が DT_NEEDED で要求する
+  #   - libjawt (JDK 同梱)   : liblwjgl64.so が DT_NEEDED で要求する。
+  #                            ここに足す JDK は runtimeInputs の JDK と同一で
+  #                            なければならない (理由は上の jdk のコメント)
   #
   #   - jportaudio           : beatoraja の PortAudio ドライバは Linux では
   #                            System.loadLibrary("jportaudio") で
