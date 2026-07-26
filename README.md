@@ -5,9 +5,8 @@ English | [日本語](./README_JP.md)
 A Nix flake that makes [beatoraja](https://github.com/exch-bms2/beatoraja) (a BMS
 player) run correctly on NixOS.
 
-**This does not package beatoraja itself.** The jar is not redistributed here.
-You extract the official release yourself, and this flake provides the launcher
-wrapper, `.desktop` entry, and icon that make it work on NixOS.
+It fetches the official release (`beatoraja0.8.8-modernchic.zip`) and provides the
+launcher wrapper and `.desktop` entry that make it work on NixOS.
 
 ## Why a wrapper is needed
 
@@ -48,15 +47,17 @@ inputs.beatoraja.nixosModules.default
 }
 ```
 
-This installs the wrapper, the desktop entry and the icon, and sets
-`GSETTINGS_SCHEMA_DIR` — which the JavaFX launcher requires.
+This installs the wrapper and the desktop entry, sets `GSETTINGS_SCHEMA_DIR` —
+which the JavaFX launcher requires — and prepares the writable game directory.
 
 Options:
 
 | Option | Default | Meaning |
 |---|---|---|
 | `programs.beatoraja.enable` | `false` | Enable the launcher |
-| `programs.beatoraja.package` | built from this flake | The wrapper package to use |
+| `programs.beatoraja.package` | built from this flake | The package to use |
+| `programs.beatoraja.dataDir` | `/var/lib/beatoraja` | Where the game reads and writes. Songs, settings and scores live here |
+| `programs.beatoraja.group` | `users` | Group allowed to write `dataDir`. Players must belong to it |
 | `programs.beatoraja.installJdk` | `true` | Also put the JavaFX-enabled JDK on the system PATH. Not needed by beatoraja itself — the wrapper carries its own |
 | `programs.beatoraja.setGsettingsSchemaDir` | `true` | Set `GSETTINGS_SCHEMA_DIR`. Turn off only if something else already sets it |
 
@@ -73,18 +74,32 @@ inputs.beatoraja.packages.${pkgs.stdenv.hostPlatform.system}.default
 Note that using the package alone skips `GSETTINGS_SCHEMA_DIR`, so the JavaFX
 launcher will still abort. Set it yourself if you go this route.
 
-The package also exposes, via `passthru`: `jdk`, `wrapper`, `icon`,
-`desktopItem`.
+The package also exposes, via `passthru`: `version`, `gameFiles`, `jdk`,
+`wrapper`, `desktopItem`.
 
-## Where beatoraja itself goes
+## Where the game files go
 
-The wrapper `cd`s into the game directory before running the jar:
+The release lands in the Nix store, but the store is read-only while beatoraja
+writes `config.json`, `player/`, `songdata.db` and scores into its own directory.
+So on first launch the wrapper copies it into `dataDir` (`/var/lib/beatoraja` by
+default) and runs from there.
 
 ```
-$BEATORAJA_DIR, or ~/.local/share/beatoraja if unset
+$BEATORAJA_DIR, or dataDir if unset
 ```
 
-Put the extracted release there, so that `beatoraja.jar` sits directly inside it.
+**Your songs, settings and scores all live there too.** Deleting it loses them.
+
+Whether the copy has happened is decided by the presence of `beatoraja.jar`. A
+newer release never overwrites `dataDir` automatically — that would risk your
+data — so the wrapper just warns when the two differ, and you update by hand.
+
+### About the icon
+
+The `.desktop` entry sets no `Icon=`. The official beatoraja distribution ships
+no icon image at all — verified across the `0.8.8` and `0.8.8-modernchic` zips,
+the contents of `beatoraja.jar`, and the GitHub releases — so there is nothing to
+extract. Your desktop environment's default icon is shown instead.
 
 ## Known issue: audio dying after you quit
 
@@ -119,7 +134,5 @@ then reviewed and corrected by hand. The relevant commits carry a
 ## License
 
 The Nix expressions in this repository are [MIT](./LICENSE). beatoraja itself is
-not included here and is under its own license.
-
-`beatoraja.png` was extracted from the icon embedded in the official
-`beatoraja.exe` and is redistributed here for the desktop entry only.
+not included in this repository — it is fetched from the official download at
+build time — and is under its own license.

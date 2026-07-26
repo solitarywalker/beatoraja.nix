@@ -1,10 +1,11 @@
 {
   lib,
   stdenv,
-  runCommand,
+  fetchzip,
   symlinkJoin,
   writeShellApplication,
   makeDesktopItem,
+  coreutils,
   openjdk,
   openjfx,
   systemd,
@@ -18,12 +19,25 @@
   libpulseaudio,
   alsa-lib,
   jportaudio,
-  # beatoraja 本体 (jar) は同梱しない。ここは jar を展開したディレクトリを指す。
-  # 実行時に BEATORAJA_DIR で上書きできる。
-  dataDir ? "$HOME/.local/share/beatoraja",
+  # 起動時にゲームが読み書きするディレクトリ。store は読み取り専用なので、
+  # 配布物をここへ複製してから使う。実行時に BEATORAJA_DIR で上書きできる。
+  dataDir ? "/var/lib/beatoraja",
 }:
 
 let
+  version = "0.8.8-modernchic";
+
+  # 配布物。展開後 671 MB あるので store を相応に消費する。
+  #
+  # zip 内には Shift-JIS のファイル名が含まれており、nix-prefetch-url --unpack
+  # (libarchive) は locale 変換に失敗する。fetchzip は unzip 経路なので通る。
+  gameFiles = fetchzip {
+    name = "beatoraja-${version}-dist";
+    url = "https://mocha-repository.info/download/beatoraja${version}.zip";
+    hash = "sha256-TujfJ7hgjEKs5NbGvwo3/nkbJFvcZ4mefgkdp6oQHw4=";
+    stripRoot = true;
+  };
+
   # ランチャー画面 (PlayConfigurationView) は JavaFX 製なので JavaFX 入りの JDK が要る。
   # WebKit はランチャー内の HTML 表示用。
   #
@@ -83,6 +97,9 @@ let
     runtimeInputs = [
       jdk
       systemd
+      # 初回の複製で使う cp / chmod / mkdir / cat。.desktop から起動されると
+      # PATH が最小限のことがあるので、環境に頼らず明示する。
+      coreutils
     ];
     text = ''
       export LD_LIBRARY_PATH=${
@@ -137,21 +154,39 @@ let
       }
       trap restartWireplumber EXIT
 
-      cd "''${BEATORAJA_DIR:-${dataDir}}"
+      # 配布物は store にあり読み取り専用だが、beatoraja は自分のディレクトリへ
+      # config.json / player/ / songdata.db / スコアなどを書く。そのため書き込み
+      # 可能な dataDir へ初回に複製し、以降はそちらを使う。
+      dir="''${BEATORAJA_DIR:-${dataDir}}"
+      stamp="$dir/.beatoraja-nix-dist"
+
+      if [[ ! -e "$dir/beatoraja.jar" ]]; then
+        echo "beatoraja: $dir へ配布物を展開しています (初回のみ、数分かかります)" >&2
+        mkdir -p "$dir"
+        cp -r ${gameFiles}/. "$dir"/
+        # store から複製したファイルは読み取り専用なので、書けるようにする
+        chmod -R ug+w "$dir"
+        echo "${gameFiles}" > "$stamp"
+      elif [[ "$(cat "$stamp" 2>/dev/null || true)" != "${gameFiles}" ]]; then
+        # 配布物が更新されたが dataDir は古いまま。ユーザーデータを壊したくないので
+        # 自動では上書きしない。
+        echo "beatoraja: 配布物が更新されています (${version})。" >&2
+        echo "  $dir は現状のまま使います。反映するには beatoraja.jar 等を手で" >&2
+        echo "  ${gameFiles} から差し替えてください。" >&2
+      fi
+
+      cd "$dir"
       # -DLWJGL_WM_CLASS: 下の desktopItem の startupWMClass と対応
       # trap を効かせるため exec しない
       java -DLWJGL_WM_CLASS=beatoraja -jar beatoraja.jar "$@"
     '';
   };
 
-  # beatoraja.exe に埋め込まれていたアイコン (200x200) を取り出したもの。
-  # hicolor の標準サイズではないので share/pixmaps に置く
-  # (freedesktop のアイコン探索のフォールバック先で、Icon=beatoraja で引ける)。
-  icon = runCommand "beatoraja-icon" { } ''
-    install -Dm444 ${./beatoraja.png} $out/share/pixmaps/beatoraja.png
-  '';
-
   # タスクバー (Plasma パネル) にピン留めするためのランチャー。
+  #
+  # Icon は指定しない。beatoraja の公式配布物にはアイコン画像が一切含まれておらず
+  # (0.8.8 / 0.8.8-modernchic の zip、jar の中、GitHub の releases すべてを確認済み)、
+  # 抽出できるものが無いため。デスクトップ環境の既定アイコンが表示される。
   #
   # startupWMClass は「起動中のウィンドウ」を「ピン留めしたアイコン」に
   # 紐づけるために必要。beatoraja の描画は LWJGL2 = X11 (XWayland) 経路で、
@@ -169,7 +204,6 @@ let
     desktopName = "beatoraja";
     genericName = "BMS Player";
     exec = "${wrapper}/bin/beatoraja";
-    icon = "beatoraja";
     terminal = false;
     startupNotify = false;
     startupWMClass = "beatoraja";
@@ -178,29 +212,29 @@ let
 in
 
 symlinkJoin {
-  name = "beatoraja";
+  name = "beatoraja-${version}";
 
   paths = [
     wrapper
-    icon
     desktopItem
   ];
 
   passthru = {
     inherit
+      version
+      gameFiles
       jdk
       wrapper
-      icon
       desktopItem
       ;
   };
 
   meta = {
-    description = "Launcher for beatoraja (BMS player) on NixOS";
+    description = "beatoraja (BMS player) for NixOS";
     longDescription = ''
-      beatoraja 本体は含まない。jar を展開したディレクトリ (既定では
-      ~/.local/share/beatoraja) を別途用意しておく必要がある。このパッケージは
-      NixOS 上でその jar を正しく起動するためのラッパー、.desktop、アイコンを提供する。
+      公式配布物 (beatoraja${version}.zip) を取得し、NixOS 上で正しく起動する
+      ラッパーと .desktop を提供する。store は読み取り専用なので、初回起動時に
+      ${dataDir} へ複製してからそこで動かす。
     '';
     homepage = "https://github.com/solitarywalker/beatoraja.nix";
     license = lib.licenses.mit;

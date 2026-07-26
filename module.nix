@@ -50,9 +50,34 @@ in
       type = lib.types.package;
       default = pkgs.callPackage ./beatoraja.nix {
         jportaudio = jportaudio.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        inherit (cfg) dataDir;
       };
       defaultText = lib.literalExpression "pkgs.callPackage ./beatoraja.nix { }";
-      description = "使用する beatoraja ラッパーパッケージ。";
+      description = "使用する beatoraja パッケージ。";
+    };
+
+    dataDir = lib.mkOption {
+      type = lib.types.path;
+      default = "/var/lib/beatoraja";
+      description = ''
+        ゲームが読み書きするディレクトリ。
+
+        store は読み取り専用だが beatoraja は自分のディレクトリへ config.json /
+        player/ / songdata.db / スコアなどを書くため、初回起動時に配布物をここへ
+        複製してから使う。楽曲データや設定もここに置かれるので、消すと失われる。
+
+        このディレクトリは下の group が書き込めるように作られる。
+      '';
+    };
+
+    group = lib.mkOption {
+      type = lib.types.str;
+      default = "users";
+      description = ''
+        dataDir を書き込めるグループ。プレイするユーザーが属している必要がある。
+
+        setgid を立てるので、この下に作られるファイルはこのグループを継承する。
+      '';
     };
 
     installJdk = lib.mkOption {
@@ -95,5 +120,12 @@ in
     environment.sessionVariables = lib.mkIf cfg.setGsettingsSchemaDir {
       GSETTINGS_SCHEMA_DIR = "${mergedGsettingsSchemas}/glib-2.0/schemas";
     };
+
+    # dataDir を group 書き込み可で用意する。ラッパーは初回起動時にここへ配布物を
+    # 複製するが、/var/lib 直下はユーザー権限では作れないため、ここで先に作っておく。
+    # 2 = setgid。以下に作られるファイルが group を継承するようにする。
+    systemd.tmpfiles.rules = [
+      "d ${cfg.dataDir} 2775 root ${cfg.group} -"
+    ];
   };
 }
