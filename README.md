@@ -101,16 +101,20 @@ no icon image at all — verified across the `0.8.8` and `0.8.8-modernchic` zips
 the contents of `beatoraja.jar`, and the GitHub releases — so there is nothing to
 extract. Your desktop environment's default icon is shown instead.
 
-## Known issue: audio dying after you quit
+## Why the wrapper restarts WirePlumber on exit
+
+It does, and that looks heavy-handed, so here is the reason.
 
 beatoraja's `PortAudioDriver` silently falls back to device index 0 (a raw `hw:`
 device) when no device matches `audio.driverName` in the config. Opening `hw:`
 exclusively can leave PipeWire unable to reopen the card, and neither PipeWire
-nor WirePlumber recovers on its own — every application stays silent after
-beatoraja exits.
+nor WirePlumber recovers on its own. Left alone, every application would stay
+silent after beatoraja exits. Restarting WirePlumber recreates the ALSA nodes and
+clears it.
 
-The wrapper restarts WirePlumber on exit as a safety net. The real fix is to pick
-a PipeWire-backed device (`pipewire` or `default`) in beatoraja's own settings.
+Picking a PipeWire-backed device (`pipewire` or `default`) in beatoraja's own
+settings avoids the situation altogether — the restart is only a safety net for
+when you haven't.
 
 ## Development
 

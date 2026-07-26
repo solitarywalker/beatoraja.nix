@@ -96,15 +96,18 @@ $BEATORAJA_DIR、未設定なら dataDir
 一切含まれていないため (`0.8.8` / `0.8.8-modernchic` の zip、`beatoraja.jar` の中身、
 GitHub の releases をすべて確認済み)。デスクトップ環境の既定アイコンが表示される。
 
-## 既知の問題: 終了後に音が出なくなる
+## 終了時に WirePlumber を再起動している理由
+
+乱暴に見えるので理由を書いておく。
 
 beatoraja の `PortAudioDriver` は config の `audio.driverName` に一致するデバイスが
 無いと、デバイス index 0 (生の `hw:`) へ黙ってフォールバックする。`hw:` を排他
 open されると PipeWire がそのカードを開き直せなくなることがあり、PipeWire も
-WirePlumber も自動復帰しないため、beatoraja 終了後に全アプリが無音のままになる。
+WirePlumber も自動復帰しない。放置すれば beatoraja 終了後に全アプリが無音のままに
+なるが、WirePlumber を再起動すると ALSA のノードが作り直されて復旧する。
 
-ラッパーは保険として終了時に WirePlumber を再起動する。根本対処は beatoraja 側の
-設定で PipeWire 経由のデバイス (`pipewire` や `default`) を選ぶこと。
+beatoraja 側の設定で PipeWire 経由のデバイス (`pipewire` や `default`) を選んで
+おけば、この状況自体が起きない。再起動はそうしていない場合の保険。
 
 ## 開発
 
