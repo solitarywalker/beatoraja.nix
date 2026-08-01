@@ -58,6 +58,7 @@ Options:
 | `programs.beatoraja.package` | built from this flake | The package to use |
 | `programs.beatoraja.dataDir` | `/var/lib/beatoraja` | Where the game reads and writes. Songs, settings and scores live here |
 | `programs.beatoraja.group` | `users` | Group allowed to write `dataDir`. Players must belong to it |
+| `programs.beatoraja.reserveAlsaCard` | `null` | ALSA card to hold exclusively while beatoraja runs, e.g. `"Macaron"`. See [Playing a card exclusively](#playing-a-card-exclusively) |
 | `programs.beatoraja.installJdk` | `true` | Also put the JavaFX-enabled JDK on the system PATH. Not needed by beatoraja itself — the wrapper carries its own |
 | `programs.beatoraja.setGsettingsSchemaDir` | `true` | Set `GSETTINGS_SCHEMA_DIR`. Turn off only if something else already sets it |
 
@@ -101,6 +102,56 @@ no icon image at all — verified across the `0.8.8` and `0.8.8-modernchic` zips
 the contents of `beatoraja.jar`, and the GitHub releases — so there is nothing to
 extract. Your desktop environment's default icon is shown instead.
 
+## Playing a card exclusively
+
+If you want beatoraja to drive a DAC directly through a `hw:` device, you will
+sooner or later hit this: **the card is not in beatoraja's device list at all.**
+
+PortAudio's ALSA host API builds that list by actually opening every `hw:` device
+to probe it, and silently drops the ones that come back `EBUSY`. A USB DAC has a
+single subdevice and no hardware mixing, so anything that streams to it without
+pause — an audio-reactive wallpaper, a monitor tap, a VoIP client sitting idle
+with the mic open — keeps PipeWire from ever suspending the node, and the card
+stays invisible. Nothing in beatoraja reports this; the entry is simply missing.
+
+`reserveAlsaCard` fixes it at the source:
+
+```nix
+programs.beatoraja.reserveAlsaCard = "Macaron";
+```
+
+The name is the one in `/proc/asound` — the id column of `/proc/asound/cards`,
+not the long description PipeWire shows:
+
+```console
+$ cat /proc/asound/cards
+ 2 [Macaron        ]: USB-Audio - Macaron
+```
+
+For as long as beatoraja runs, the wrapper holds the ALSA device reservation
+(`org.freedesktop.ReserveDevice1`) on that card via `pw-reserve`. WirePlumber
+honours it, closes the card even mid-playback, and moves everything else to
+another sink; on exit the name is released and the node comes back, streams
+included. This is also what makes exclusive `hw:` use safe in the first place —
+PipeWire is not competing for the card, so it cannot end up with the broken node
+described below.
+
+`audio.driverName` in `config_sys.json` still has to name the card the way
+PortAudio spells it:
+
+```json
+"driver": "PortAudio",
+"driverName": "Macaron: USB Audio (hw:2,0)",
+```
+
+Beware that this is *not* the name PipeWire or OpenAL uses for the same card
+(`Macaron Analog Stereo`). If it does not match, beatoraja falls back to device
+index 0 without saying so — see below.
+
+Leave the option at `null` if you select the `pipewire` or `default` device
+instead. Those go through PipeWire, need no reservation, and leave the card
+available to everything else while you play.
+
 ## Why the wrapper restarts WirePlumber on exit
 
 It does, and that looks heavy-handed, so here is the reason.
@@ -112,9 +163,10 @@ nor WirePlumber recovers on its own. Left alone, every application would stay
 silent after beatoraja exits. Restarting WirePlumber recreates the ALSA nodes and
 clears it.
 
-Picking a PipeWire-backed device (`pipewire` or `default`) in beatoraja's own
-settings avoids the situation altogether — the restart is only a safety net for
-when you haven't.
+Picking a device beatoraja does not have to fight over avoids the situation
+altogether — either a PipeWire-backed one (`pipewire` or `default`) in
+beatoraja's own settings, or a `hw:` device on a card handed over with
+`reserveAlsaCard`. The restart is only a safety net for when you haven't.
 
 ## Development
 

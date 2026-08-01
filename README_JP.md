@@ -57,6 +57,7 @@ inputs.beatoraja.nixosModules.default
 | `programs.beatoraja.package` | この flake でビルドしたもの | 使用するパッケージ |
 | `programs.beatoraja.dataDir` | `/var/lib/beatoraja` | ゲームが読み書きするディレクトリ。楽曲・設定・スコアもここ |
 | `programs.beatoraja.group` | `users` | dataDir を書き込めるグループ。プレイするユーザーが属している必要がある |
+| `programs.beatoraja.reserveAlsaCard` | `null` | beatoraja 実行中だけ排他で確保する ALSA カード名 (例 `"Macaron"`)。[カードを排他で使う](#カードを排他で使う) を参照 |
 | `programs.beatoraja.installJdk` | `true` | JavaFX 入り JDK をシステムの PATH にも置く。beatoraja 自体には不要 (ラッパーが自前で抱えている) |
 | `programs.beatoraja.setGsettingsSchemaDir` | `true` | `GSETTINGS_SCHEMA_DIR` を設定する。他の仕組みで設定済みの場合のみ false に |
 
@@ -96,6 +97,53 @@ $BEATORAJA_DIR、未設定なら dataDir
 一切含まれていないため (`0.8.8` / `0.8.8-modernchic` の zip、`beatoraja.jar` の中身、
 GitHub の releases をすべて確認済み)。デスクトップ環境の既定アイコンが表示される。
 
+## カードを排他で使う
+
+DAC を `hw:` デバイスで直接鳴らそうとすると、遅かれ早かれこれに当たる:
+**そのカードが beatoraja のデバイス一覧に出てこない。**
+
+PortAudio の ALSA ホスト API は、一覧を作るときに各 `hw:` デバイスを実際に open
+して能力を調べ、`EBUSY` が返ったものを黙って落とす。USB DAC はサブデバイスが 1 つ
+でハード側ミキシングも無いので、途切れずに流し込むもの (音に反応する壁紙、モニター
+タップ、マイクを掴んだまま待機している VoIP クライアントなど) が 1 つでもあると
+PipeWire のノードが永久に suspend せず、カードは見えないままになる。beatoraja は
+何も言わない。ただ項目が無いだけ。
+
+`reserveAlsaCard` はこれを元から潰す:
+
+```nix
+programs.beatoraja.reserveAlsaCard = "Macaron";
+```
+
+指定する名前は `/proc/asound` に出るもの、つまり `/proc/asound/cards` の id 列で
+あって、PipeWire が表示する長い説明ではない:
+
+```console
+$ cat /proc/asound/cards
+ 2 [Macaron        ]: USB-Audio - Macaron
+```
+
+beatoraja 実行中、ラッパーは `pw-reserve` でそのカードの ALSA デバイス予約
+(`org.freedesktop.ReserveDevice1`) を握り続ける。WirePlumber はこれを尊重して
+再生中でもカードを閉じ、他のストリームを別のシンクへ退避させる。終了時に名前を
+解放するとノードが作り直され、ストリームも戻ってくる。排他 `hw:` 利用が安全に
+なるのはこれのおかげでもある。PipeWire がカードを取り合わないので、後述のノードが
+壊れる状況自体が起こり得ない。
+
+`config_sys.json` の `audio.driverName` は、PortAudio 側の綴りで書く必要がある:
+
+```json
+"driver": "PortAudio",
+"driverName": "Macaron: USB Audio (hw:2,0)",
+```
+
+同じカードでも PipeWire や OpenAL が使う名前 (`Macaron Analog Stereo`) とは別物な
+ので注意。一致しないと beatoraja は何も言わずデバイス index 0 へフォールバックする
+(後述)。
+
+`pipewire` や `default` デバイスを選ぶ場合は `null` のままでよい。PipeWire 経由な
+ので予約は不要で、プレイ中も他のアプリがそのカードを使える。
+
 ## 終了時に WirePlumber を再起動している理由
 
 乱暴に見えるので理由を書いておく。
@@ -106,8 +154,10 @@ open されると PipeWire がそのカードを開き直せなくなること�
 WirePlumber も自動復帰しない。放置すれば beatoraja 終了後に全アプリが無音のままに
 なるが、WirePlumber を再起動すると ALSA のノードが作り直されて復旧する。
 
-beatoraja 側の設定で PipeWire 経由のデバイス (`pipewire` や `default`) を選んで
-おけば、この状況自体が起きない。再起動はそうしていない場合の保険。
+beatoraja が奪い合わずに済むデバイスを選んでおけば、この状況自体が起きない。
+beatoraja 側の設定で PipeWire 経由のデバイス (`pipewire` や `default`) を選ぶか、
+`reserveAlsaCard` で明け渡させたカードの `hw:` を選ぶか。再起動はそうしていない
+場合の保険。
 
 ## 開発
 

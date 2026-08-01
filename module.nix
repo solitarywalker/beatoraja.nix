@@ -51,7 +51,7 @@ in
       type = lib.types.package;
       default = pkgs.callPackage ./beatoraja.nix {
         jportaudio = jportaudio.packages.${pkgs.stdenv.hostPlatform.system}.default;
-        inherit (cfg) dataDir;
+        inherit (cfg) dataDir reserveAlsaCard;
       };
       defaultText = lib.literalExpression "pkgs.callPackage ./beatoraja.nix { }";
       description = "The beatoraja package to use.";
@@ -79,6 +79,30 @@ in
         Group allowed to write dataDir. Anyone who plays must belong to it.
 
         setgid is set, so files created underneath inherit this group.
+      '';
+    };
+
+    reserveAlsaCard = lib.mkOption {
+      type = lib.types.nullOr lib.types.str;
+      default = null;
+      example = "Macaron";
+      description = ''
+        ALSA card to hold exclusively while beatoraja runs, named as it appears in
+        /proc/asound — the id column of /proc/asound/cards, not the long
+        description PipeWire shows.
+
+        Set this to drive a card straight through a hw: device. For as long as
+        beatoraja runs the wrapper holds the ALSA device reservation
+        (org.freedesktop.ReserveDevice1) on it, so WirePlumber closes the card and
+        moves everything else to another sink, and hands it back on exit.
+
+        Without it, a card PipeWire keeps open never shows up in beatoraja's
+        PortAudio device list in the first place: the list is built by opening each
+        device, and busy ones are dropped. Leave it null if you select the
+        "pipewire" or "default" device instead — those need no reservation.
+
+        audio.driverName in config_sys.json has to name the same card as PortAudio
+        spells it, e.g. "Macaron: USB Audio (hw:2,0)".
       '';
     };
 

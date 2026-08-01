@@ -19,9 +19,14 @@
   libpulseaudio,
   alsa-lib,
   jportaudio,
+  pipewire,
   # Directory the game reads and writes at runtime. The store is read-only, so the
   # distribution is copied here first. Overridable at runtime via BEATORAJA_DIR.
   dataDir ? "/var/lib/beatoraja",
+  # ALSA card to hold exclusively while beatoraja runs, named as it appears in
+  # /proc/asound (the id column of /proc/asound/cards), e.g. "Macaron". null
+  # disables the reservation entirely. See the comment on it in the wrapper.
+  reserveAlsaCard ? null,
 }:
 
 let
@@ -104,7 +109,9 @@ let
       # cp / chmod / mkdir / cat for the first-run copy. PATH can be minimal when
       # launched from the .desktop entry, so don't rely on the environment.
       coreutils
-    ];
+    ]
+    # pw-reserve. Only pulled in when a card is actually being reserved.
+    ++ lib.optional (reserveAlsaCard != null) pipewire;
     text = ''
       export LD_LIBRARY_PATH=${
         lib.makeLibraryPath [
@@ -124,6 +131,71 @@ let
 
       # Prefer pipewire-pulse, fall back to ALSA
       export ALSOFT_DRIVERS="''${ALSOFT_DRIVERS:-pulse,alsa}"
+      ${lib.optionalString (reserveAlsaCard != null) ''
+
+        # Holding one ALSA card exclusively for as long as beatoraja runs.
+        #
+        # PortAudio's ALSA host API builds its device list by actually opening every
+        # hw: device to probe it, and silently drops the ones that come back EBUSY.
+        # A card PipeWire is holding open therefore does not even appear in
+        # beatoraja's device list — it cannot be picked, let alone used. A USB DAC
+        # has a single subdevice and no hardware mixing, so anything streaming to it
+        # without pause (an audio-reactive wallpaper, a monitor tap, ...) keeps the
+        # node from ever suspending and hides the card for good.
+        #
+        # WirePlumber honours org.freedesktop.ReserveDevice1: while another process
+        # owns AudioN it closes that card — mid-playback if need be — and recreates
+        # the node once the name is released. pw-reserve is the tool that does
+        # nothing but hold the name. Streams sitting on the card move to another
+        # sink while it is held and come back afterwards (measured).
+        #
+        # This is what makes exclusive hw: use safe: PipeWire is not competing for
+        # the card, so the "hw: grabbed first, node left broken" failure described
+        # below cannot arise in the first place. The WirePlumber restart stays on as
+        # a safety net for the case where pw-reserve dies before beatoraja does.
+        #
+        # N in AudioN is the ALSA card index, which moves around for USB devices, so
+        # it is resolved through the /proc/asound/<card name> symlink at launch
+        # instead of being baked into the wrapper.
+        alsaCardIsOpen() {
+          local f
+          for f in /proc/asound/"$1"/pcm*p/sub*/status; do
+            [[ -e "$f" ]] || continue
+            [[ "$(head -n 1 "$f")" == closed ]] || return 0
+          done
+          return 1
+        }
+
+        acquireAlsaCard() {
+          local name=$1
+          local index i
+
+          if [[ ! -e /proc/asound/$name ]]; then
+            echo "beatoraja: ALSA card '$name' not found, running without reserving it" >&2
+            return 0
+          fi
+          index=$(readlink /proc/asound/"$name")
+
+          pw-reserve -n "Audio''${index#card}" -r -p 100 -a beatoraja &
+          reservePid=$!
+
+          # RequestRelease is asynchronous — pw-reserve is up long before
+          # WirePlumber has actually let go — so wait for the card to close rather
+          # than guess at a delay.
+          for ((i = 0; i < 50; i++)); do
+            alsaCardIsOpen "$name" || return 0
+            sleep 0.2
+          done
+          echo "beatoraja: ALSA card '$name' did not come free within 10s, starting anyway" >&2
+        }
+
+        releaseAlsaCard() {
+          [[ -n "''${reservePid:-}" ]] || return 0
+          kill "$reservePid" 2>/dev/null || true
+          wait "$reservePid" 2>/dev/null || true
+          reservePid=""
+        }
+      ''}
 
       # Cleaning up after the PortAudio driver.
       #
@@ -154,13 +226,24 @@ let
       #  pw-dump dies of SIGPIPE whether or not it matched. Conditions of this
       #  shape simply cannot be written here.)
       #
-      # The real fix is to select a PipeWire-backed device ("pipewire" or
-      # "default") in beatoraja's own settings. This is only a safety net for
-      # when that hasn't been done.
-      restartWireplumber() {
+      # The real fix is to select a device beatoraja does not have to fight over —
+      # either a PipeWire-backed one ("pipewire" or "default") in beatoraja's own
+      # settings, or a hw: device on a card handed over via reserveAlsaCard above.
+      # This is only a safety net for when neither has been done.
+      #
+      # Trapped on INT/TERM as well as EXIT, because bash does not run the EXIT trap
+      # for a signal it has no handler for — and leaving the reservation held would
+      # keep the card away from the rest of the session. Disarmed on entry so it
+      # cannot run twice.
+      cleanup() {
+        trap - EXIT INT TERM
+        ${lib.optionalString (reserveAlsaCard != null) "releaseAlsaCard"}
         systemctl --user restart wireplumber || true
       }
-      trap restartWireplumber EXIT
+      trap cleanup EXIT INT TERM
+      ${lib.optionalString (
+        reserveAlsaCard != null
+      ) "acquireAlsaCard ${lib.escapeShellArg reserveAlsaCard}"}
 
       # The distribution lives in the store and is read-only, but beatoraja writes
       # config.json / player/ / songdata.db / scores into its own directory. So
